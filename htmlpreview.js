@@ -95,7 +95,7 @@
 	};
 
 	var replaceAssets = function () {
-		var media, link, script, scripts = [], i, p;
+		var media, a, href, link, script, scripts = [], i, p;
 		if (document.querySelectorAll('frameset').length) return;
 
 		// Images / <source> / video posters (src/poster were stashed as data-* in the HTML)
@@ -103,6 +103,15 @@
 		for (i = 0; i < media.length; ++i) loadMedia(media[i], 'data-hpsrc', 'src');
 		media = document.querySelectorAll('[data-hpposter]');
 		for (i = 0; i < media.length; ++i) loadMedia(media[i], 'data-hpposter', 'poster');
+
+		// In-page anchors: the injected <base> would otherwise resolve "#foo" against the
+		// raw file URL and navigate away (404). Re-point fragment links at this page so
+		// they just scroll within the preview.
+		a = document.querySelectorAll('a[href]');
+		for (i = 0; i < a.length; ++i) {
+			href = a[i].getAttribute('href');
+			if (href && href.charAt(0) === '#') a[i].setAttribute('href', location.pathname + location.search + href);
+		}
 
 		// Stylesheets -> fetch text, inline as <style>
 		link = document.querySelectorAll('link[rel=stylesheet]');
