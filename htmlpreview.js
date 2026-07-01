@@ -65,15 +65,6 @@
 		return m ? decodeURIComponent(m[1]) : null;
 	};
 
-	// Small concurrency limiter so ~100 images don't fire ~100 simultaneous API calls
-	// (which browsers -- Safari especially -- drop under load, leaving images broken).
-	var MAX = 6, active = 0, waiting = [];
-	var pump = function () {
-		while (active < MAX && waiting.length) { active++; waiting.shift()().then(done, done); }
-	};
-	var done = function () { active--; pump(); };
-	var enqueue = function (job) { waiting.push(job); pump(); };
-
 	var withRetry = function (fn, n) {
 		return fn().catch(function (e) {
 			if (n <= 0) throw e;
@@ -82,10 +73,10 @@
 	};
 
 	// Lazy-load: only resolve + fetch an image as it nears the viewport, so a long report
-	// doesn't download ~100 images (and make ~100 API calls) up front -- images lower in
-	// the document were otherwise queued behind everything above them. Resolving at scroll
-	// time also keeps each short-lived signed URL fresh. Falls back to eager loading if
-	// IntersectionObserver is unavailable.
+	// doesn't fetch ~100 images (and make ~100 API calls) up front. This viewport bound is
+	// what lets us fire each visible image immediately without a global concurrency cap.
+	// Resolving at scroll time also keeps each short-lived signed URL fresh. Falls back to
+	// eager loading if IntersectionObserver is unavailable.
 	var lazyObserver = ('IntersectionObserver' in window) ? new IntersectionObserver(function (entries, obs) {
 		entries.forEach(function (e) {
 			if (e.isIntersecting) { obs.unobserve(e.target); if (e.target._hpLoad) e.target._hpLoad(); }
@@ -104,7 +95,11 @@
 		var load = function () {
 			el.onload = function () { el.style.minHeight = ''; };                                                    // drop placeholder once loaded
 			el.onerror = function () { el.onerror = null; setFresh().catch(function (e) { console.error(path, e); }); }; // one retry w/ fresh signed URL
-			enqueue(function () { return withRetry(setFresh, 2).catch(function (e) { console.error(path, e); }); });
+			// No global concurrency cap: lazy-loading already bounds how many images
+			// resolve at once (only those near the viewport), and the browser's own
+			// per-host connection limit throttles the raw.githubusercontent image
+			// downloads. So each visible image fires its API call immediately.
+			withRetry(setFresh, 2).catch(function (e) { console.error(path, e); });
 		};
 		if (lazyObserver && targetAttr === 'src') {
 			if (!el.getAttribute('height') && !el.style.height) el.style.minHeight = '200px';                        // reserve space (source has no dimensions) so off-screen imgs stay off-screen
