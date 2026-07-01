@@ -2,136 +2,134 @@
 
 	var previewForm = document.getElementById('previewform');
 
-	var url = location.search.substring(1).replace(/\/\/github\.com/, '//raw.githubusercontent.com').replace(/\/blob\//, '/'); //Get URL of the raw file
+	// --- FORK: preview PRIVATE repos by fetching through the authenticated GitHub API.
+	// raw.githubusercontent.com does NOT accept a PAT (?token= is ignored, and its CORS
+	// preflight rejects an Authorization header), so we cannot load private assets there.
+	// api.github.com's contents endpoint IS CORS-enabled and accepts `Authorization`, so
+	// we fetch the HTML + every asset through it with the token in a header. Images are
+	// pulled as blobs and swapped in as object URLs. The token travels only as an HTTPS
+	// header to api.github.com (never in an asset URL, never through a third-party proxy).
 
-	// --- FORK CHANGE: carry the private-repo access token onto sub-resources ---------
-	// Upstream htmlpreview injects a <base href="...file.html?token=xxx"> and lets the
-	// browser resolve relative asset URLs against it. But relative URL resolution drops
-	// the query string, so images/CSS/JS get requested from raw.githubusercontent.com
-	// WITHOUT the ?token=, and private-repo assets 403. We extract the token here and
-	// re-append it to every asset URL that points at raw.githubusercontent.com.
-	var tokenMatch = url.match(/[?&]token=([^&#]+)/);
+	var search = location.search.substring(1);                     // everything after the first ?
+	var tokenMatch = search.match(/[?&]token=([^&#]+)/);
 	var token = tokenMatch ? tokenMatch[1] : '';
+	var target = search.replace(/[?&]token=[^&#]+/, '');           // target URL without the token
 
-	var addToken = function (u) {
-		if (!token || !u) return u;
-		if (u.indexOf('//raw.githubusercontent.com') < 0 && u.indexOf('//bitbucket.org') < 0) return u; //Only touch private-repo raw asset hosts
-		if (/[?&]token=/.test(u)) return u; //Already tokenized
-		return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + token;
+	// Parse owner / repo / ref / path from a github.com/blob/... or raw.githubusercontent/... URL
+	var parse = function (u) {
+		var m = u.match(/\/\/github\.com\/([^\/]+)\/([^\/]+)\/blob\/([^\/]+)\/([^?#]+)/);
+		if (!m) m = u.match(/\/\/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/(?:refs\/heads\/)?([^\/]+)\/([^?#]+)/);
+		return m ? { owner: m[1], repo: m[2], ref: m[3], path: decodeURIComponent(m[4]) } : null;
 	};
-	// --------------------------------------------------------------------------------
+	var t = parse(target);
+
+	// Base URL used ONLY to resolve relative asset paths to a repo path (never fetched itself)
+	var rawBase = t ? 'https://raw.githubusercontent.com/' + t.owner + '/' + t.repo + '/' + t.ref + '/' + t.path : '';
+
+	var mime = function (path) {
+		var ext = (path.split('.').pop() || '').toLowerCase();
+		return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+			svg: 'image/svg+xml', webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon',
+			css: 'text/css', js: 'application/javascript', json: 'application/json',
+			html: 'text/html', htm: 'text/html' })[ext] || 'application/octet-stream';
+	};
+
+	var apiUrl = function (path) {
+		return 'https://api.github.com/repos/' + t.owner + '/' + t.repo + '/contents/' +
+			path.split('/').map(encodeURIComponent).join('/') + '?ref=' + encodeURIComponent(t.ref);
+	};
+	var ghFetch = function (path) {
+		return fetch(apiUrl(path), { headers: {
+			'Authorization': 'token ' + token,
+			'Accept': 'application/vnd.github.raw'
+		} }).then(function (res) {
+			if (!res.ok) throw new Error('Cannot load ' + path + ': ' + res.status + ' ' + res.statusText);
+			return res;
+		});
+	};
+	var ghText = function (path) { return ghFetch(path).then(function (r) { return r.text(); }); };
+	var ghObjectURL = function (path) {
+		return ghFetch(path).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+			return URL.createObjectURL(new Blob([buf], { type: mime(path) }));
+		});
+	};
+
+	// Absolute raw.githubusercontent URL (from <base> resolution) -> repo-relative path
+	var rawToPath = function (u) {
+		var m = u && u.match(/\/\/raw\.githubusercontent\.com\/[^\/]+\/[^\/]+\/(?:refs\/heads\/)?[^\/]+\/([^?#]+)/);
+		return m ? decodeURIComponent(m[1]) : null;
+	};
 
 	var replaceAssets = function () {
-		var frame, a, link, links = [], script, scripts = [], img, i, href, src;
-		//Framesets
-		if (document.querySelectorAll('frameset').length)
-			return; //Don't replace CSS/JS if it's a frameset, because it will be erased by document.write()
-		//Frames
-		frame = document.querySelectorAll('iframe[src],frame[src]');
-		for (i = 0; i < frame.length; ++i) {
-			src = frame[i].src; //Get absolute URL
-			if (src.indexOf('//raw.githubusercontent.com') > 0 || src.indexOf('//bitbucket.org') > 0) { //Check if it's from raw.github.com or bitbucket.org
-				frame[i].src = '//' + location.hostname + location.pathname + '?' + addToken(src); //Then rewrite URL so it can be loaded using CORS proxy
-			}
-		}
-		//Images (and <picture>/<source>, video posters) -- NOT handled by upstream
+		var img, link, script, scripts = [], i, p;
+		if (document.querySelectorAll('frameset').length) return;
+
+		// Images / <source> / video posters -> fetch as blob via API, swap in object URL
 		img = document.querySelectorAll('img[src],source[src],video[poster]');
-		for (i = 0; i < img.length; ++i) {
-			if (img[i].getAttribute('src')) img[i].src = addToken(img[i].src); //Get absolute URL and re-append token
-			if (img[i].getAttribute('poster')) img[i].poster = addToken(img[i].poster);
-		}
-		//Links
-		a = document.querySelectorAll('a[href]');
-		for (i = 0; i < a.length; ++i) {
-			href = a[i].href; //Get absolute URL
-			if (href.indexOf('#') > 0) { //Check if it's an anchor
-				a[i].href = '//' + location.hostname + location.pathname + location.search + '#' + a[i].hash.substring(1); //Then rewrite URL with support for empty anchor
-			} else if ((href.indexOf('//raw.githubusercontent.com') > 0 || href.indexOf('//bitbucket.org') > 0) && (href.indexOf('.html') > 0 || href.indexOf('.htm') > 0)) { //Check if it's from raw.github.com or bitbucket.org and to HTML files
-				a[i].href = '//' + location.hostname + location.pathname + '?' + addToken(href); //Then rewrite URL so it can be loaded using CORS proxy
-			}
-		}
-		//Stylesheets
+		for (i = 0; i < img.length; ++i) (function (el) {
+			['src', 'poster'].forEach(function (attr) {
+				if (!el.getAttribute(attr)) return;
+				var path = rawToPath(el[attr]);            // el[attr] is absolute (resolved via <base>)
+				if (!path) return;                          // external / non-repo asset: leave as-is
+				ghObjectURL(path).then(function (obj) { el[attr] = obj; })
+					.catch(function (e) { console.error(e); });
+			});
+		})(img[i]);
+
+		// Stylesheets -> fetch text, inline as <style>
 		link = document.querySelectorAll('link[rel=stylesheet]');
 		for (i = 0; i < link.length; ++i) {
-			href = link[i].href; //Get absolute URL
-			if (href.indexOf('//raw.githubusercontent.com') > 0 || href.indexOf('//bitbucket.org') > 0) { //Check if it's from raw.github.com or bitbucket.org
-				links.push(fetchProxy(addToken(href), null, 0)); //Then add it to links queue and fetch using CORS proxy
-			}
+			p = rawToPath(link[i].href);
+			if (p) ghText(p).then(loadCSS).catch(function (e) { console.error(e); });
 		}
-		Promise.all(links).then(function (res) {
-			for (i = 0; i < res.length; ++i) {
-				loadCSS(res[i]);
-			}
-		});
-		//Scripts
+
+		// Scripts -> run in order (external fetched via API, inline kept as-is)
 		script = document.querySelectorAll('script[type="text/htmlpreview"]');
 		for (i = 0; i < script.length; ++i) {
-			src = script[i].src; //Get absolute URL
-			if (src.indexOf('//raw.githubusercontent.com') > 0 || src.indexOf('//bitbucket.org') > 0) { //Check if it's from raw.github.com or bitbucket.org
-				scripts.push(fetchProxy(addToken(src), null, 0)); //Then add it to scripts queue and fetch using CORS proxy
+			p = script[i].src ? rawToPath(script[i].src) : null;
+			if (p) {
+				scripts.push(ghText(p));
 			} else {
 				script[i].removeAttribute('type');
-				scripts.push(script[i].innerHTML); //Add inline script to queue to eval in order
+				scripts.push(script[i].innerHTML);
 			}
 		}
 		Promise.all(scripts).then(function (res) {
-			for (i = 0; i < res.length; ++i) {
-				loadJS(res[i]);
-			}
-			document.dispatchEvent(new Event('DOMContentLoaded', {bubbles: true, cancelable: true})); //Dispatch DOMContentLoaded event after loading all scripts
-		});
+			for (i = 0; i < res.length; ++i) loadJS(res[i]);
+			document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true, cancelable: true }));
+		}).catch(function (e) { console.error(e); });
 	};
 
 	var loadHTML = function (data) {
-		if (data) {
-			data = data.replace(/<head([^>]*)>/i, '<head$1><base href="' + url + '">').replace(/<script(\s*src=["'][^"']*["'])?(\s*type=["'](text|application)\/javascript["'])?/gi, '<script type="text/htmlpreview"$1'); //Add <base> just after <head> and replace <script type="text/javascript"> with <script type="text/htmlpreview">
-			setTimeout(function () {
-				document.open();
-				document.write(data);
-				document.close();
-				replaceAssets();
-			}, 10); //Delay updating document to have it cleared before
-		}
+		if (!data) return;
+		data = data.replace(/<head([^>]*)>/i, '<head$1><base href="' + rawBase + '">')
+			.replace(/<script(\s*src=["'][^"']*["'])?(\s*type=["'](text|application)\/javascript["'])?/gi, '<script type="text/htmlpreview"$1');
+		setTimeout(function () {
+			document.open();
+			document.write(data);
+			document.close();
+			replaceAssets();
+		}, 10);
 	};
 
 	var loadCSS = function (data) {
-		if (data) {
-			var style = document.createElement('style');
-			style.innerHTML = data;
-			document.head.appendChild(style);
-		}
+		if (data) { var s = document.createElement('style'); s.innerHTML = data; document.head.appendChild(s); }
 	};
 
 	var loadJS = function (data) {
-		if (data) {
-			var script = document.createElement('script');
-			script.innerHTML = data;
-			document.body.appendChild(script);
-		}
+		if (data) { var s = document.createElement('script'); s.innerHTML = data; document.body.appendChild(s); }
 	};
 
-	var fetchProxy = function (url, options, i) {
-		var proxy = [
-			'', // try without proxy first
-			'https://api.codetabs.com/v1/proxy/?quest='
-		];
-		return fetch(proxy[i] + url, options).then(function (res) {
-			if (!res.ok) throw new Error('Cannot load ' + url + ': ' + res.status + ' ' + res.statusText);
-			return res.text();
-		}).catch(function (error) {
-			if (i === proxy.length - 1)
-				throw error;
-			return fetchProxy(url, options, i + 1);
-		})
-	};
-
-	if (url && url.indexOf(location.hostname) < 0)
-		fetchProxy(url, null, 0).then(loadHTML).catch(function (error) {
+	if (t && token) {
+		ghText(t.path).then(loadHTML).catch(function (error) {
 			console.error(error);
 			previewForm.style.display = 'block';
-			previewForm.innerText = error;
+			previewForm.innerText = String(error);
 		});
-	else
+	} else {
 		previewForm.style.display = 'block';
+		if (target && !token) previewForm.innerText = 'Missing "?token=<your PAT>" at the end of the URL.';
+		if (target && !t) previewForm.innerText = 'Could not parse a github.com/<owner>/<repo>/blob/<ref>/<path> URL.';
+	}
 
 })()
