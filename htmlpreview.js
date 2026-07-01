@@ -105,12 +105,13 @@
 		for (i = 0; i < media.length; ++i) loadMedia(media[i], 'data-hpposter', 'poster');
 
 		// In-page anchors: the injected <base> would otherwise resolve "#foo" against the
-		// raw file URL and navigate away (404). Re-point fragment links at this page so
-		// they just scroll within the preview.
+		// raw file URL and navigate away (404). Re-point fragment links at this page's FULL
+		// absolute URL so <base> can't touch them (a root-relative "/..." would still be
+		// resolved against the base's origin). They then just scroll within the preview.
 		a = document.querySelectorAll('a[href]');
 		for (i = 0; i < a.length; ++i) {
 			href = a[i].getAttribute('href');
-			if (href && href.charAt(0) === '#') a[i].setAttribute('href', location.pathname + location.search + href);
+			if (href && href.charAt(0) === '#') a[i].setAttribute('href', location.href.split('#')[0] + href);
 		}
 
 		// Stylesheets -> fetch text, inline as <style>
