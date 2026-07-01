@@ -81,6 +81,17 @@
 		});
 	};
 
+	// Lazy-load: only resolve + fetch an image as it nears the viewport, so a long report
+	// doesn't download ~100 images (and make ~100 API calls) up front -- images lower in
+	// the document were otherwise queued behind everything above them. Resolving at scroll
+	// time also keeps each short-lived signed URL fresh. Falls back to eager loading if
+	// IntersectionObserver is unavailable.
+	var lazyObserver = ('IntersectionObserver' in window) ? new IntersectionObserver(function (entries, obs) {
+		entries.forEach(function (e) {
+			if (e.isIntersecting) { obs.unobserve(e.target); if (e.target._hpLoad) e.target._hpLoad(); }
+		});
+	}, { rootMargin: '800px 0px' }) : null;
+
 	// Resolve one media element's stashed URL to an authenticated one and set it exactly
 	// once. Because the src was neutralized in the HTML, the browser never fired a doomed
 	// unauthenticated request first, so there is no broken-image flash to recover from.
@@ -90,8 +101,18 @@
 		var path = rawToPath(new URL(orig, rawBase).href);
 		if (!path) { el[targetAttr] = orig; return; } // external / data: asset -> restore as-is
 		var setFresh = function () { return ghDownloadUrl(path).then(function (url) { el[targetAttr] = url; }); };
-		el.onerror = function () { el.onerror = null; setFresh().catch(function (e) { console.error(path, e); }); }; // one retry w/ fresh signed URL
-		enqueue(function () { return withRetry(setFresh, 2).catch(function (e) { console.error(path, e); }); });
+		var load = function () {
+			el.onload = function () { el.style.minHeight = ''; };                                                    // drop placeholder once loaded
+			el.onerror = function () { el.onerror = null; setFresh().catch(function (e) { console.error(path, e); }); }; // one retry w/ fresh signed URL
+			enqueue(function () { return withRetry(setFresh, 2).catch(function (e) { console.error(path, e); }); });
+		};
+		if (lazyObserver && targetAttr === 'src') {
+			if (!el.getAttribute('height') && !el.style.height) el.style.minHeight = '200px';                        // reserve space (source has no dimensions) so off-screen imgs stay off-screen
+			el._hpLoad = load;
+			lazyObserver.observe(el);
+		} else {
+			load();
+		}
 	};
 
 	var replaceAssets = function () {
