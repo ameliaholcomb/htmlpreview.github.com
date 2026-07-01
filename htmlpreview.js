@@ -26,14 +26,6 @@
 	// Base URL used ONLY to resolve relative asset paths to a repo path (never fetched itself)
 	var rawBase = t ? 'https://raw.githubusercontent.com/' + t.owner + '/' + t.repo + '/' + t.ref + '/' + t.path : '';
 
-	var mime = function (path) {
-		var ext = (path.split('.').pop() || '').toLowerCase();
-		return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-			svg: 'image/svg+xml', webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon',
-			css: 'text/css', js: 'application/javascript', json: 'application/json',
-			html: 'text/html', htm: 'text/html' })[ext] || 'application/octet-stream';
-	};
-
 	var apiUrl = function (path) {
 		return 'https://api.github.com/repos/' + t.owner + '/' + t.repo + '/contents/' +
 			path.split('/').map(encodeURIComponent).join('/') + '?ref=' + encodeURIComponent(t.ref);
@@ -48,9 +40,22 @@
 		});
 	};
 	var ghText = function (path) { return ghFetch(path).then(function (r) { return r.text(); }); };
-	var ghObjectURL = function (path) {
-		return ghFetch(path).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
-			return URL.createObjectURL(new Blob([buf], { type: mime(path) }));
+
+	// Resolve a repo path to its pre-signed raw download URL (a raw.githubusercontent.com
+	// link with a short-lived ?token= for private repos). Loading images directly from
+	// this URL avoids reading large binary bodies through fetch(), which Firefox truncates
+	// on the raw-media redirect (NS_ERROR_NET_PARTIAL_TRANSFER / "Content-Length exceeds
+	// response Body"). The PAT itself is never placed in an image URL.
+	var ghDownloadUrl = function (path) {
+		return fetch(apiUrl(path), { headers: {
+			'Authorization': 'token ' + token,
+			'Accept': 'application/vnd.github.object'
+		} }).then(function (res) {
+			if (!res.ok) throw new Error('Cannot resolve ' + path + ': ' + res.status + ' ' + res.statusText);
+			return res.json();
+		}).then(function (j) {
+			if (!j.download_url) throw new Error('No download_url for ' + path);
+			return j.download_url;
 		});
 	};
 
@@ -71,7 +76,7 @@
 				if (!el.getAttribute(attr)) return;
 				var path = rawToPath(el[attr]);            // el[attr] is absolute (resolved via <base>)
 				if (!path) return;                          // external / non-repo asset: leave as-is
-				ghObjectURL(path).then(function (obj) { el[attr] = obj; })
+				ghDownloadUrl(path).then(function (url) { el[attr] = url; })
 					.catch(function (e) { console.error(e); });
 			});
 		})(img[i]);
