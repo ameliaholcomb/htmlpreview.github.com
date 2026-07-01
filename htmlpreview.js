@@ -65,21 +65,44 @@
 		return m ? decodeURIComponent(m[1]) : null;
 	};
 
+	// Small concurrency limiter so ~100 images don't fire ~100 simultaneous API calls
+	// (which browsers -- Safari especially -- drop under load, leaving images broken).
+	var MAX = 6, active = 0, waiting = [];
+	var pump = function () {
+		while (active < MAX && waiting.length) { active++; waiting.shift()().then(done, done); }
+	};
+	var done = function () { active--; pump(); };
+	var enqueue = function (job) { waiting.push(job); pump(); };
+
+	var withRetry = function (fn, n) {
+		return fn().catch(function (e) {
+			if (n <= 0) throw e;
+			return new Promise(function (r) { setTimeout(r, 500); }).then(function () { return withRetry(fn, n - 1); });
+		});
+	};
+
+	// Resolve one media element's stashed URL to an authenticated one and set it exactly
+	// once. Because the src was neutralized in the HTML, the browser never fired a doomed
+	// unauthenticated request first, so there is no broken-image flash to recover from.
+	var loadMedia = function (el, dataAttr, targetAttr) {
+		var orig = el.getAttribute(dataAttr);
+		el.removeAttribute(dataAttr);
+		var path = rawToPath(new URL(orig, rawBase).href);
+		if (!path) { el[targetAttr] = orig; return; } // external / data: asset -> restore as-is
+		var setFresh = function () { return ghDownloadUrl(path).then(function (url) { el[targetAttr] = url; }); };
+		el.onerror = function () { el.onerror = null; setFresh().catch(function (e) { console.error(path, e); }); }; // one retry w/ fresh signed URL
+		enqueue(function () { return withRetry(setFresh, 2).catch(function (e) { console.error(path, e); }); });
+	};
+
 	var replaceAssets = function () {
-		var img, link, script, scripts = [], i, p;
+		var media, link, script, scripts = [], i, p;
 		if (document.querySelectorAll('frameset').length) return;
 
-		// Images / <source> / video posters -> fetch as blob via API, swap in object URL
-		img = document.querySelectorAll('img[src],source[src],video[poster]');
-		for (i = 0; i < img.length; ++i) (function (el) {
-			['src', 'poster'].forEach(function (attr) {
-				if (!el.getAttribute(attr)) return;
-				var path = rawToPath(el[attr]);            // el[attr] is absolute (resolved via <base>)
-				if (!path) return;                          // external / non-repo asset: leave as-is
-				ghDownloadUrl(path).then(function (url) { el[attr] = url; })
-					.catch(function (e) { console.error(e); });
-			});
-		})(img[i]);
+		// Images / <source> / video posters (src/poster were stashed as data-* in the HTML)
+		media = document.querySelectorAll('[data-hpsrc]');
+		for (i = 0; i < media.length; ++i) loadMedia(media[i], 'data-hpsrc', 'src');
+		media = document.querySelectorAll('[data-hpposter]');
+		for (i = 0; i < media.length; ++i) loadMedia(media[i], 'data-hpposter', 'poster');
 
 		// Stylesheets -> fetch text, inline as <style>
 		link = document.querySelectorAll('link[rel=stylesheet]');
@@ -108,6 +131,11 @@
 	var loadHTML = function (data) {
 		if (!data) return;
 		data = data.replace(/<head([^>]*)>/i, '<head$1><base href="' + rawBase + '">')
+			// Stash media URLs in data-* so the browser does NOT fire an immediate
+			// unauthenticated request (403 -> broken-image flash) before we swap in the
+			// authenticated URL. loadMedia() sets the real src exactly once.
+			.replace(/(<(?:img|source)\b[^>]*?\s)src=/gi, '$1data-hpsrc=')
+			.replace(/(<video\b[^>]*?\s)poster=/gi, '$1data-hpposter=')
 			.replace(/<script(\s*src=["'][^"']*["'])?(\s*type=["'](text|application)\/javascript["'])?/gi, '<script type="text/htmlpreview"$1');
 		setTimeout(function () {
 			document.open();
